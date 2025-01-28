@@ -24,7 +24,7 @@ var log = clog.NewWithPlugin("mdns")
 type MDNS struct {
 	Next        plugin.Handler
 	Domain      string
-	mdnsType    string
+	mdnsTypes   []string
 	minSRV      int
 	filter      string
 	bindAddress string
@@ -71,7 +71,6 @@ func GetIndex(host string) string {
 }
 
 func (m MDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-
 	log.Debug("Received query")
 	msg := new(dns.Msg)
 	msg.SetReply(r)
@@ -129,7 +128,7 @@ func (m MDNS) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (i
 	return plugin.NextOrFailure(m.Name(), m.Next, ctx, w, r)
 }
 
-func (m *MDNS) BrowseMDNS() {
+func (m *MDNS) BrowseMDNS(ctx context.Context) {
 	entriesCh := make(chan *zeroconf.ServiceEntry)
 	srvEntriesCh := make(chan *zeroconf.ServiceEntry)
 	mdnsHosts := make(map[string]*zeroconf.ServiceEntry)
@@ -181,8 +180,18 @@ func (m *MDNS) BrowseMDNS() {
 			iface = foundIface
 		}
 	}
-	_ = queryService(m.mdnsType, entriesCh, iface, ZeroconfImpl{})
-	_ = queryService("_etcd-server-ssl._tcp", srvEntriesCh, iface, ZeroconfImpl{})
+	var opts zeroconf.ClientOption
+	if iface.Name != "" {
+		opts = zeroconf.SelectIfaces([]net.Interface{iface})
+	}
+	resolver, err := ZeroconfImpl{}.NewResolver(opts)
+	if err != nil {
+		log.Errorf("Failed to initialize resolver: %s", err.Error())
+		return
+	}
+
+	_ = queryServices(ctx, m.mdnsTypes, entriesCh, resolver)
+	_ = queryServices(ctx, []string{"_etcd-server-ssl._tcp"}, srvEntriesCh, resolver)
 
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
@@ -224,22 +233,16 @@ func (m *MDNS) BrowseMDNS() {
 	log.Debugf("cnames: %v", m.cnames)
 }
 
-func queryService(service string, channel chan *zeroconf.ServiceEntry, iface net.Interface, z ZeroconfInterface) error {
-	var opts zeroconf.ClientOption
-	if iface.Name != "" {
-		opts = zeroconf.SelectIfaces([]net.Interface{iface})
-	}
-	resolver, err := z.NewResolver(opts)
-	if err != nil {
-		log.Errorf("Failed to initialize %s resolver: %s", service, err.Error())
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+func queryServices(ctx context.Context, services []string, channel chan *zeroconf.ServiceEntry, resolver ResolverInterface) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	err = resolver.Browse(ctx, service, "local.", channel)
-	if err != nil {
-		log.Errorf("Failed to browse %s records: %s", service, err.Error())
-		return err
+
+	for _, service := range services {
+		err := resolver.Browse(ctx, service, "local.", channel)
+		if err != nil {
+			log.Errorf("Failed to browse %s records: %s", service, err.Error())
+			return err
+		}
 	}
 	<-ctx.Done()
 	return nil

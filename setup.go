@@ -1,6 +1,7 @@
 package mdns
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,7 +25,7 @@ func setup(c *caddy.Controller) error {
 	c.Next()
 	c.NextArg()
 	domain := c.Val()
-	mdnsType := "_workstation._tcp"
+	mdnsTypes := []string{}
 	minSRV := 3
 	// Note that a filter of "" will match everything
 	filter := ""
@@ -34,10 +35,10 @@ func setup(c *caddy.Controller) error {
 		switch c.Val() {
 		case "type":
 			remaining := c.RemainingArgs()
-			if len(remaining) != 1 {
+			if len(remaining) < 1 {
 				return c.Errf("type needs to exist")
 			}
-			mdnsType = remaining[0]
+			mdnsTypes = remaining
 		case "min_srv_records":
 			remaining := c.RemainingArgs()
 			if len(remaining) != 1 {
@@ -65,11 +66,15 @@ func setup(c *caddy.Controller) error {
 		}
 	}
 
-	log.Infof("domain:          %s", domain);
-	log.Infof("type:            %s", mdnsType);
-	log.Infof("min_srv_records: %d", minSRV);
-	log.Infof("filter_text:     %s", filter);
-	log.Infof("bind_address:    %s", bindAddress);
+	if len(mdnsTypes) == 0 {
+		mdnsTypes = []string{"_workstation._tcp"}
+	}
+
+	log.Infof("domain:          %s", domain)
+	log.Infof("type:            %v", mdnsTypes)
+	log.Infof("min_srv_records: %d", minSRV)
+	log.Infof("filter_text:     %s", filter)
+	log.Infof("bind_address:    %s", bindAddress)
 
 	// Because the plugin interface uses a value receiver, we need to make these
 	// pointers so all copies of the plugin point at the same maps.
@@ -77,10 +82,26 @@ func setup(c *caddy.Controller) error {
 	srvHosts := make(map[string][]*zeroconf.ServiceEntry)
 	cnames := make(map[string]string)
 	mutex := sync.RWMutex{}
-	m := MDNS{Domain: strings.TrimSuffix(domain, "."), mdnsType: mdnsType, minSRV: minSRV, filter: filter, bindAddress: bindAddress, mutex: &mutex, mdnsHosts: &mdnsHosts, srvHosts: &srvHosts, cnames: &cnames}
+	m := MDNS{
+		Domain:      strings.TrimSuffix(domain, "."),
+		mdnsTypes:   mdnsTypes,
+		minSRV:      minSRV,
+		filter:      filter,
+		bindAddress: bindAddress,
+		mutex:       &mutex,
+		mdnsHosts:   &mdnsHosts,
+		srvHosts:    &srvHosts,
+		cnames:      &cnames,
+	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	c.OnStartup(func() error {
-		go browseLoop(&m)
+		go browseLoop(ctx, &m)
+		return nil
+	})
+	c.OnShutdown(func() error {
+		cancel()
 		return nil
 	})
 
@@ -92,9 +113,9 @@ func setup(c *caddy.Controller) error {
 	return nil
 }
 
-func browseLoop(m *MDNS) {
+func browseLoop(ctx context.Context, m *MDNS) {
 	for {
-		m.BrowseMDNS()
+		m.BrowseMDNS(ctx)
 		// 5 seconds seems to be the minimum ttl that the cache plugin will allow
 		// Since each browse operation takes around 2 seconds, this should be fine
 		time.Sleep(5 * time.Second)

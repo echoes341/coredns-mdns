@@ -52,7 +52,7 @@ func TestAddARecord(t *testing.T) {
 		srvHosts := make(map[string][]*zeroconf.ServiceEntry)
 		cnames := make(map[string]string)
 		mutex := sync.RWMutex{}
-		m := MDNS{nil, tc.domain, "", 0, "", "", &mutex, &hosts, &srvHosts, &cnames}
+		m := MDNS{nil, tc.domain, nil, 0, "", "", &mutex, &hosts, &srvHosts, &cnames}
 		msg := new(dns.Msg)
 		reply := new(dns.Msg)
 		msg.SetReply(reply)
@@ -107,12 +107,15 @@ func TestQueryService(t *testing.T) {
 		zeroconfImpl  ZeroconfInterface
 	}{
 		{"queryService succeeds", "", fakeZeroconf{}},
-		{"NewResolver fails", "test resolver error", failZeroconf{}},
 		{"Browse fails", "test browse error", browseFailZeroconf{}},
 	}
 	for _, tc := range testCases {
 		entriesCh := make(chan *zeroconf.ServiceEntry)
-		result := queryService("test", entriesCh, net.Interface{}, tc.zeroconfImpl)
+		resolver, err := tc.zeroconfImpl.NewResolver()
+		if err != nil {
+			t.Fatalf("Failed to create resolver in %v: %v", tc.tcase, err)
+		}
+		result := queryServices(context.TODO(), []string{"test"}, entriesCh, resolver)
 		if tc.expectedError == "" {
 			if result != nil {
 				t.Errorf("Unexpected failure in %v: %v", tc.tcase, result)
